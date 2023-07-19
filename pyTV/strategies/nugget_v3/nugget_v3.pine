@@ -1,0 +1,532 @@
+// © kitoboynaya
+//@version=5
+strategy(
+  title='Nugget-v3',
+  overlay=true,
+  default_qty_type=strategy.percent_of_equity,
+  default_qty_value=10,
+  initial_capital=10000.0,
+  currency='USDT',
+  commission_type=strategy.commission.percent, 
+  commission_value=0.075,
+  process_orders_on_close=true,
+  max_lines_count=500,
+  max_labels_count=500
+  )
+
+// ————— Inputs
+startBacktest    = input.time(  timestamp('01 Jan 2011 00:00 +0000'), 'Start backtest',       group='Risk-management')
+endBacktest      = input.time(  timestamp('01 Jan 2031 00:00 +0000'), 'Finish backtest',      group='Risk-management')
+direction        = input.string('all',                                'Direction',            ['all', 'longs', 'shorts', 'none'],         group='Risk-management')
+account          = input.string('account #1',                         'Account name',         ['account #1', 'account #2', 'account #3'], group='Risk-management')
+leverage         = input.int(   10,                                   'Leverage',             group='Risk-management')
+margin           = input.float( 10.0,                                 'Margin, %',            group='Risk-management')
+stopType         = input.string('Type #3',                            'Stop type',            ['Type #1', 'Type #2', 'Type #3'],          group='Risk-management')
+stop             = input.float( 3.0,                                  'Stop-loss, %',         step=0.05,                                  group='Risk-management')
+trailStopValue   = input.int(   1,                                    'Trailing stop take #', minval=0,                                   maxval=9, group='Risk-management')
+trailStopPercent = input.float( 0.0,                                  'Trailing stop, %',     step=5.0,                                   group='Risk-management')
+
+takeVolume11 = input.float(10.0, 'Volume #1', group='Take-profits type #1')
+takeVolume12 = input.float(10.0, 'Volume #2', group='Take-profits type #1')
+takeVolume13 = input.float(10.0, 'Volume #3', group='Take-profits type #1')
+takeVolume14 = input.float(20.0, 'Volume #4', group='Take-profits type #1')
+takeVolume15 = input.float(50.0, 'Volume #5', group='Take-profits type #1')
+
+takeVolume21  = input.float(5.0,  'Volume #1',  group='Take-profits type #2')
+takeVolume22  = input.float(5.0,  'Volume #2',  group='Take-profits type #2')
+takeVolume23  = input.float(10.0, 'Volume #3',  group='Take-profits type #2')
+takeVolume24  = input.float(10.0, 'Volume #4',  group='Take-profits type #2')
+takeVolume25  = input.float(10.0, 'Volume #5',  group='Take-profits type #2')
+takeVolume26  = input.float(20.0, 'Volume #6',  group='Take-profits type #2')
+takeVolume27  = input.float(20.0, 'Volume #7',  group='Take-profits type #2')
+takeVolume28  = input.float(10.0, 'Volume #8',  group='Take-profits type #2')
+takeVolume29  = input.float(5.0,  'Volume #9',  group='Take-profits type #2')
+takeVolume210 = input.float(5.0,  'Volume #10', group='Take-profits type #2')
+
+stAtrPeriod = input.int(  2,    'ATR length',    group='Supertrend')
+stFactor    = input.float(21.0, 'Factor',        step=0.05, group='Supertrend')
+stUpperBand = input.float(5.0,  'Upper band, %', step=0.05, group='Supertrend')
+stLowerBand = input.float(2.0,  'Lower band, %', step=0.05, group='Supertrend')
+
+rsiLength          = input.int(  5,     'RSI length',        group='RSI')
+rsiLongUpperBound  = input.float(29.0,  'Long upper bound',  inline='Long',  group='RSI')
+rsiLongLowerBound  = input.float(28.0,  'Long lower bound',  inline='Long',  group='RSI')
+rsiShortUpperBound = input.float(69.0,  'Short upper bound', inline='Short', group='RSI')
+rsiShortLowerBound = input.float(68.0,  'Short lower bound', inline='Short', group='RSI')
+filterSwitch       = input.bool( false, 'BB filter',         group='RSI')
+maLength           = input.int(  14,    'SMA(RSI) length',   group='RSI')
+bbMult             = input.float(2.0,   'BB StdDev',         step=0.1,       group='RSI')
+bbLongBound        = input.float(29.0,  'Long bound',        group='RSI')
+bbShortBound       = input.float(61.0,  'Short bound',       group='RSI')
+
+pivotBars     = input.int(  5,   'Pivot bars',            group='Pivots')
+lookBack      = input.int(  60,   'Loock back',            group='Pivots')
+channelRange  = input.float(10.0, 'Min channgel range, %', group='Pivots')
+
+
+// ————— Functions
+get_backtest() => time >= startBacktest and time <= endBacktest
+
+getRSI(timeframe, expression) =>
+    request.security(syminfo.tickerid, timeframe, expression[1], lookahead = barmerge.lookahead_on)
+
+
+// ————— Calculation of indicators
+[supertrend, stDirection] = ta.supertrend(stFactor, stAtrPeriod)
+
+rsi = ta.rsi(close, rsiLength)
+maRSI = ta.sma(rsi, maLength)
+bbUpperBand = maRSI + ta.stdev(rsi, maLength) * bbMult 
+bbLowerBand = maRSI - ta.stdev(rsi, maLength) * bbMult
+
+var        pivotLHBarIndexArray = array.new_int()
+var        pivotHLBarIndexArray = array.new_int()
+var        pivotLHArray         = array.new_float()
+var        pivotHLArray         = array.new_float()
+var string lastPivot            = na
+var float  pivotHH              = na
+var float  pivotLL              = na
+var float  lastChannelRange     = na
+
+pivotLH = ta.pivothigh(high, pivotBars, pivotBars)
+pivotHL = ta.pivotlow(low, pivotBars, pivotBars)
+
+if pivotLHBarIndexArray.size() > 0
+    if bar_index - pivotLHBarIndexArray.get(0) > lookBack
+        pivotLHBarIndexArray.shift()
+        pivotLHArray.shift()
+        pivotHH := pivotLHArray.max()
+
+if pivotHLBarIndexArray.size() > 0
+    if bar_index - pivotHLBarIndexArray.get(0) > lookBack
+        pivotHLBarIndexArray.shift()
+        pivotHLArray.shift()
+        pivotLL := pivotHLArray.min()
+
+if not na(pivotLH)
+    if pivotLH >= pivotLHArray.max() or na(pivotHH)
+        pivotHH := pivotLH
+        lastPivot := 'high'
+
+    pivotLHBarIndexArray.push(bar_index - pivotBars)
+    pivotLHArray.push(high[pivotBars])
+
+if not na(pivotHL)
+    if pivotHL <= pivotHLArray.min() or na(pivotLL)
+        pivotLL := pivotHL
+        lastPivot := 'low'
+
+    pivotHLBarIndexArray.push(bar_index - pivotBars)
+    pivotHLArray.push(low[pivotBars])
+
+fiboValues = array.new_float(13, na)
+fiboValues.set(0,  0.0)
+fiboValues.set(1,  0.236)
+fiboValues.set(2,  0.382)
+fiboValues.set(3,  0.5)
+fiboValues.set(4,  0.618)
+fiboValues.set(5,  0.8)
+fiboValues.set(6,  1.0)
+fiboValues.set(7,  1.618)
+fiboValues.set(8,  2.0)
+fiboValues.set(9,  2.618)
+fiboValues.set(10, 3.0)
+fiboValues.set(11, 3.618)
+fiboValues.set(12, 4.0)
+
+var fiboLevels = array.new_float(13, na)
+
+
+// ————— Strategy calculation
+var long               = false
+var short              = false
+var stopMoved          = false
+var float stopLoss     = na
+var float takeProfit1  = na
+var float takeProfit2  = na
+var float takeProfit3  = na
+var float takeProfit4  = na
+var float takeProfit5  = na
+var float takeProfit6  = na
+var float takeProfit7  = na
+var float takeProfit8  = na
+var float takeProfit9  = na
+var float takeProfit10 = na
+
+preEntryLong = (
+  strategy.position_size == 0 and
+  stDirection < 0 and
+  (close / supertrend - 1) * 100 > stLowerBand and
+  (close / supertrend - 1) * 100 < stUpperBand and
+  rsi < rsiLongUpperBound and
+  rsi > rsiLongLowerBound and
+  (filterSwitch ? bbUpperBand < bbLongBound : true) and
+  lastPivot == 'low' and
+  (direction == 'all' or direction == 'longs') and
+  get_backtest()
+  )
+preEntryShort = (
+  strategy.position_size == 0 and
+  stDirection > 0 and
+  (supertrend / close - 1) * 100 > stLowerBand and
+  (supertrend / close - 1) * 100 < stUpperBand and
+  rsi < rsiShortUpperBound and
+  rsi > rsiShortLowerBound and
+  (filterSwitch ? bbLowerBand > bbShortBound : true) and
+  lastPivot == 'high' and
+  (direction == 'all' or direction == 'shorts') and
+  get_backtest()
+  )
+changeStop = ta.change(supertrend)
+
+if preEntryLong
+    if not na(pivotHH) and not na(pivotLL)
+        lastChannelRange := (pivotHH / pivotLL - 1) * 100
+
+        for i = 0 to fiboValues.size() - 1
+            entryPrice = pivotLL + (pivotHH - pivotLL) * array.get(fiboValues, i)
+            array.set(fiboLevels, i, entryPrice)
+
+if preEntryShort
+    if not na(pivotHH) and not na(pivotLL)
+        lastChannelRange := (pivotHH / pivotLL - 1) * 100
+
+        for i = 0 to fiboValues.size() - 1
+            entryPrice = pivotHH - (pivotHH - pivotLL) * array.get(fiboValues, i)
+            array.set(fiboLevels, i, entryPrice)
+
+entryLong = preEntryLong and close < fiboLevels.get(3) and close >= fiboLevels.get(0)
+entryShort = preEntryShort and close > fiboLevels.get(3) and close <= fiboLevels.get(0)
+
+if strategy.position_size <= 0 and long
+    long         := false
+    stopMoved    := false
+    stopLoss     := na
+    takeProfit1  := na
+    takeProfit2  := na
+    takeProfit3  := na
+    takeProfit4  := na
+    takeProfit5  := na
+    takeProfit6  := na
+    takeProfit7  := na
+    takeProfit8  := na
+    takeProfit9  := na
+    takeProfit10 := na
+    strategy.cancel_all()
+
+    alert(message='Cancel: a=' + account + ', e=' + syminfo.prefix + ', s=' + syminfo.root)
+
+if long
+    if stopType == 'Type #1' and changeStop and stDirection < 0
+        stopLoss := supertrend * (100 - stop) / 100
+        strategy.exit('SL long', stop=stopLoss, oca_name='OCA #1')
+
+        alert_stop = 'Stop: a=' + account + ', e=' + syminfo.prefix + ', s=' + syminfo.root + ', b=long, p=' + str.tostring(stopLoss)
+        alert(message=alert_stop)
+    else if (stopType == 'Type #2' or stopType == 'Type #3') and not stopMoved
+        take = switch
+            trailStopValue == 9 and high >= takeProfit9 => takeProfit9
+            trailStopValue == 8 and high >= takeProfit8 => takeProfit8
+            trailStopValue == 7 and high >= takeProfit7 => takeProfit7
+            trailStopValue == 6 and high >= takeProfit6 => takeProfit6
+            trailStopValue == 5 and high >= takeProfit5 => takeProfit5
+            trailStopValue == 4 and high >= takeProfit4 => takeProfit4
+            trailStopValue == 3 and high >= takeProfit3 => takeProfit3
+            trailStopValue == 2 and high >= takeProfit2 => takeProfit2
+            trailStopValue == 1 and high >= takeProfit1 => takeProfit1
+            => na
+        
+        if not na(take)
+            stopMoved := true
+            entryPrice = strategy.opentrades.entry_price(0)
+            stopLoss := ((take - entryPrice) * (trailStopPercent / 100)) + entryPrice
+            strategy.exit('SL long', stop=stopLoss, oca_name='OCA #1')
+
+            alert_stop = 'Stop: a=' + account + ', e=' + syminfo.prefix + ', s=' + syminfo.root + ', b=long, p=' + str.tostring(stopLoss)
+            alert(message=alert_stop)
+
+if entryLong
+    long := true
+
+    positionSize = strategy.equity / close * (margin / 100.0) * leverage
+    strategy.entry('Long', strategy.long, positionSize)
+
+    if stopType == 'Type #1' or stopType == 'Type #2'
+        stopLoss := supertrend * (100 - stop) / 100
+    else if stopType == 'Type #3'
+        stopLoss := fiboLevels.get(0) * (100 - stop) / 100
+
+    strategy.exit('SL long', stop=stopLoss, oca_name='OCA #1')
+
+    if lastChannelRange >= channelRange
+        if close >= fiboLevels.get(0) and close < fiboLevels.get(1)
+            takeProfit1 := fiboLevels.get(2)
+            takeProfit2 := fiboLevels.get(3)
+            takeProfit3 := fiboLevels.get(4)
+            takeProfit4 := fiboLevels.get(5)
+            takeProfit5 := fiboLevels.get(6)
+        else if close >= fiboLevels.get(1)
+            takeProfit1 := fiboLevels.get(3)
+            takeProfit2 := fiboLevels.get(4)
+            takeProfit3 := fiboLevels.get(5)
+            takeProfit4 := fiboLevels.get(6)
+            takeProfit5 := fiboLevels.get(7)
+
+        qtyTake1 = positionSize * takeVolume11 / 100
+        qtyTake2 = positionSize * (takeVolume11 + takeVolume12) / 100
+        qtyTake3 = positionSize * (takeVolume11 + takeVolume12 + takeVolume13) / 100
+        qtyTake4 = positionSize * (takeVolume11 + takeVolume12 + takeVolume13 + takeVolume14) / 100
+        qtyTake5 = positionSize * (takeVolume11 + takeVolume12 + takeVolume13 + takeVolume14 + takeVolume15) / 100
+        
+        strategy.order('TP long #1', strategy.short, qtyTake1, takeProfit1, oca_name='OCA #1', oca_type=strategy.oca.reduce)
+        strategy.order('TP long #2', strategy.short, qtyTake2, takeProfit2, oca_name='OCA #1', oca_type=strategy.oca.reduce)
+        strategy.order('TP long #3', strategy.short, qtyTake3, takeProfit3, oca_name='OCA #1', oca_type=strategy.oca.reduce)
+        strategy.order('TP long #4', strategy.short, qtyTake4, takeProfit4, oca_name='OCA #1', oca_type=strategy.oca.reduce)
+        strategy.order('TP long #5', strategy.short, qtyTake5, takeProfit5, oca_name='OCA #1', oca_type=strategy.oca.reduce)
+
+        alert_entry  = 'Entry: a=' + account + ', e=' + syminfo.prefix + ', s=' + syminfo.root + ', b=long, q=' + str.tostring(margin)       + '%, l=' + str.tostring(leverage)
+        alert_stop   = 'Stop: a='  + account + ', e=' + syminfo.prefix + ', s=' + syminfo.root + ', b=long, p=' + str.tostring(stopLoss)
+        alert_take_1 = 'Take: a='  + account + ', e=' + syminfo.prefix + ', s=' + syminfo.root + ', b=long, q=' + str.tostring(takeVolume11) + '%, p=' + str.tostring(takeProfit1)
+        alert_take_2 = 'Take: a='  + account + ', e=' + syminfo.prefix + ', s=' + syminfo.root + ', b=long, q=' + str.tostring(takeVolume12) + '%, p=' + str.tostring(takeProfit2)
+        alert_take_3 = 'Take: a='  + account + ', e=' + syminfo.prefix + ', s=' + syminfo.root + ', b=long, q=' + str.tostring(takeVolume13) + '%, p=' + str.tostring(takeProfit3)
+        alert_take_4 = 'Take: a='  + account + ', e=' + syminfo.prefix + ', s=' + syminfo.root + ', b=long, q=' + str.tostring(takeVolume14) + '%, p=' + str.tostring(takeProfit4)
+        alert_take_5 = 'Take: a='  + account + ', e=' + syminfo.prefix + ', s=' + syminfo.root + ', b=long, q=100%, p=' + str.tostring(takeProfit5)
+        alert(message=alert_entry + '\n' + alert_stop + '\n' + alert_take_1  + '\n' + alert_take_2  + '\n' + alert_take_3  + '\n' + alert_take_4  + '\n' + alert_take_5)
+    else if lastChannelRange < channelRange
+        if close >= fiboLevels.get(0) and close < fiboLevels.get(2)
+            takeProfit1  := fiboLevels.get(2)
+            takeProfit2  := fiboLevels.get(3)
+            takeProfit3  := fiboLevels.get(4)
+            takeProfit4  := fiboLevels.get(5)
+            takeProfit5  := fiboLevels.get(6)
+            takeProfit6  := fiboLevels.get(7)
+            takeProfit7  := fiboLevels.get(8)
+            takeProfit8  := fiboLevels.get(9)
+            takeProfit9  := fiboLevels.get(10)
+            takeProfit10 := fiboLevels.get(11)
+        else if close >= fiboLevels.get(2)
+            takeProfit1  := fiboLevels.get(3)
+            takeProfit2  := fiboLevels.get(4)
+            takeProfit3  := fiboLevels.get(5)
+            takeProfit4  := fiboLevels.get(6)
+            takeProfit5  := fiboLevels.get(7)
+            takeProfit6  := fiboLevels.get(8)
+            takeProfit7  := fiboLevels.get(9)
+            takeProfit8  := fiboLevels.get(10)
+            takeProfit9  := fiboLevels.get(11)
+            takeProfit10 := fiboLevels.get(12)
+
+        qtyTake1  = positionSize * takeVolume21 / 100
+        qtyTake2  = positionSize * (takeVolume21 + takeVolume22) / 100
+        qtyTake3  = positionSize * (takeVolume21 + takeVolume22 + takeVolume23) / 100
+        qtyTake4  = positionSize * (takeVolume21 + takeVolume22 + takeVolume23 + takeVolume24) / 100
+        qtyTake5  = positionSize * (takeVolume21 + takeVolume22 + takeVolume23 + takeVolume24 + takeVolume25) / 100
+        qtyTake6  = positionSize * (takeVolume21 + takeVolume22 + takeVolume23 + takeVolume24 + takeVolume25 + takeVolume26) / 100
+        qtyTake7  = positionSize * (takeVolume21 + takeVolume22 + takeVolume23 + takeVolume24 + takeVolume25 + takeVolume26 + takeVolume27) / 100
+        qtyTake8  = positionSize * (takeVolume21 + takeVolume22 + takeVolume23 + takeVolume24 + takeVolume25 + takeVolume26 + takeVolume27 + takeVolume28) / 100
+        qtyTake9  = positionSize * (takeVolume21 + takeVolume22 + takeVolume23 + takeVolume24 + takeVolume25 + takeVolume26 + takeVolume27 + takeVolume28 + takeVolume29) / 100
+        qtyTake10 = positionSize * (takeVolume21 + takeVolume22 + takeVolume23 + takeVolume24 + takeVolume25 + takeVolume26 + takeVolume27 + takeVolume28 + takeVolume29 + takeVolume210) / 100
+        
+        strategy.order('TP long #1',  strategy.short, qtyTake1,  takeProfit1,  oca_name='OCA #1', oca_type=strategy.oca.reduce)
+        strategy.order('TP long #2',  strategy.short, qtyTake2,  takeProfit2,  oca_name='OCA #1', oca_type=strategy.oca.reduce)
+        strategy.order('TP long #3',  strategy.short, qtyTake3,  takeProfit3,  oca_name='OCA #1', oca_type=strategy.oca.reduce)
+        strategy.order('TP long #4',  strategy.short, qtyTake4,  takeProfit4,  oca_name='OCA #1', oca_type=strategy.oca.reduce)
+        strategy.order('TP long #5',  strategy.short, qtyTake5,  takeProfit5,  oca_name='OCA #1', oca_type=strategy.oca.reduce)
+        strategy.order('TP long #6',  strategy.short, qtyTake6,  takeProfit6,  oca_name='OCA #1', oca_type=strategy.oca.reduce)
+        strategy.order('TP long #7',  strategy.short, qtyTake7,  takeProfit7,  oca_name='OCA #1', oca_type=strategy.oca.reduce)
+        strategy.order('TP long #8',  strategy.short, qtyTake8,  takeProfit8,  oca_name='OCA #1', oca_type=strategy.oca.reduce)
+        strategy.order('TP long #9',  strategy.short, qtyTake9,  takeProfit9,  oca_name='OCA #1', oca_type=strategy.oca.reduce)
+        strategy.order('TP long #10', strategy.short, qtyTake10, takeProfit10, oca_name='OCA #1', oca_type=strategy.oca.reduce)
+
+        alert_entry   = 'Entry: a=' + account + ', e=' + syminfo.prefix + ', s=' + syminfo.root + ', b=long, q=' + str.tostring(margin)       + '%, l=' + str.tostring(leverage)
+        alert_stop    = 'Stop: a='  + account + ', e=' + syminfo.prefix + ', s=' + syminfo.root + ', b=long, p=' + str.tostring(stopLoss)
+        alert_take_1  = 'Take: a='  + account + ', e=' + syminfo.prefix + ', s=' + syminfo.root + ', b=long, q=' + str.tostring(takeVolume21) + '%, p=' + str.tostring(takeProfit1)
+        alert_take_2  = 'Take: a='  + account + ', e=' + syminfo.prefix + ', s=' + syminfo.root + ', b=long, q=' + str.tostring(takeVolume22) + '%, p=' + str.tostring(takeProfit2)
+        alert_take_3  = 'Take: a='  + account + ', e=' + syminfo.prefix + ', s=' + syminfo.root + ', b=long, q=' + str.tostring(takeVolume23) + '%, p=' + str.tostring(takeProfit3)
+        alert_take_4  = 'Take: a='  + account + ', e=' + syminfo.prefix + ', s=' + syminfo.root + ', b=long, q=' + str.tostring(takeVolume24) + '%, p=' + str.tostring(takeProfit4)
+        alert_take_5  = 'Take: a='  + account + ', e=' + syminfo.prefix + ', s=' + syminfo.root + ', b=long, q=' + str.tostring(takeVolume25) + '%, p=' + str.tostring(takeProfit5)
+        alert_take_6  = 'Take: a='  + account + ', e=' + syminfo.prefix + ', s=' + syminfo.root + ', b=long, q=' + str.tostring(takeVolume26) + '%, p=' + str.tostring(takeProfit6)
+        alert_take_7  = 'Take: a='  + account + ', e=' + syminfo.prefix + ', s=' + syminfo.root + ', b=long, q=' + str.tostring(takeVolume27) + '%, p=' + str.tostring(takeProfit7)
+        alert_take_8  = 'Take: a='  + account + ', e=' + syminfo.prefix + ', s=' + syminfo.root + ', b=long, q=' + str.tostring(takeVolume28) + '%, p=' + str.tostring(takeProfit8)
+        alert_take_9  = 'Take: a='  + account + ', e=' + syminfo.prefix + ', s=' + syminfo.root + ', b=long, q=' + str.tostring(takeVolume29) + '%, p=' + str.tostring(takeProfit9)
+        alert_take_10 = 'Take: a='  + account + ', e=' + syminfo.prefix + ', s=' + syminfo.root + ', b=long, q=100%, p=' + str.tostring(takeProfit10)
+        alert(message=alert_entry + '\n' + alert_stop + '\n' + alert_take_1  + '\n' + alert_take_2  + '\n' + alert_take_3  + '\n' + alert_take_4  + '\n' + alert_take_5 +
+          '\n' + alert_take_6 + '\n' + alert_take_7 + '\n' + alert_take_8 + '\n' + alert_take_9 + '\n' + alert_take_10)
+
+if strategy.position_size >= 0 and short
+    short        := false
+    stopMoved    := false
+    stopLoss     := na
+    takeProfit1  := na
+    takeProfit2  := na
+    takeProfit3  := na
+    takeProfit4  := na
+    takeProfit5  := na
+    takeProfit6  := na
+    takeProfit7  := na
+    takeProfit8  := na
+    takeProfit9  := na
+    takeProfit10 := na
+    strategy.cancel_all()
+
+    alert(message='Cancel: a=' + account + ', e=' + syminfo.prefix + ', s=' + syminfo.root)
+
+if short
+    if stopType == 'Type #1' and changeStop and stDirection > 0
+        stopLoss := supertrend * (100 + stop) / 100
+        strategy.exit('SL short', stop=stopLoss, oca_name='OCA #1')
+
+        alert_stop = 'Stop: a=' + account + ', e=' + syminfo.prefix + ', s=' + syminfo.root + ', b=short, p=' + str.tostring(stopLoss)
+        alert(message=alert_stop)
+    else if (stopType == 'Type #2' or stopType == 'Type #3') and not stopMoved
+        take = switch
+            trailStopValue == 9 and low <= takeProfit9 => takeProfit9
+            trailStopValue == 8 and low <= takeProfit8 => takeProfit8
+            trailStopValue == 7 and low <= takeProfit7 => takeProfit7
+            trailStopValue == 6 and low <= takeProfit6 => takeProfit6
+            trailStopValue == 5 and low <= takeProfit5 => takeProfit5
+            trailStopValue == 4 and low <= takeProfit4 => takeProfit4
+            trailStopValue == 3 and low <= takeProfit3 => takeProfit3
+            trailStopValue == 2 and low <= takeProfit2 => takeProfit2
+            trailStopValue == 1 and low <= takeProfit1 => takeProfit1
+            => na
+        
+        if not na(take)
+            stopMoved := true
+            entryPrice = strategy.opentrades.entry_price(0)
+            stopLoss := ((take - entryPrice) * (trailStopPercent / 100)) + entryPrice
+            strategy.exit('SL short', stop=stopLoss, oca_name='OCA #1')
+
+            alert_stop = 'Stop: a=' + account + ', e=' + syminfo.prefix + ', s=' + syminfo.root + ', b=short, p=' + str.tostring(stopLoss)
+            alert(message=alert_stop)
+
+if entryShort
+    short := true
+
+    positionSize = strategy.equity / close * (margin / 100.0) * leverage
+    strategy.entry('Short', strategy.short, positionSize)
+
+    if stopType == 'Type #1' or stopType == 'Type #2'
+        stopLoss := supertrend * (100 + stop) / 100
+    else if stopType == 'Type #3'
+        stopLoss := fiboLevels.get(0) * (100 + stop) / 100
+
+    strategy.exit('SL short', stop=stopLoss, oca_name='OCA #1')
+
+    if lastChannelRange >= channelRange
+        if close <= fiboLevels.get(0) and close > fiboLevels.get(1)
+            takeProfit1 := fiboLevels.get(2)
+            takeProfit2 := fiboLevels.get(3)
+            takeProfit3 := fiboLevels.get(4)
+            takeProfit4 := fiboLevels.get(5)
+            takeProfit5 := fiboLevels.get(6)
+        else if close <= fiboLevels.get(1)
+            takeProfit1 := fiboLevels.get(3)
+            takeProfit2 := fiboLevels.get(4)
+            takeProfit3 := fiboLevels.get(5)
+            takeProfit4 := fiboLevels.get(6)
+            takeProfit5 := fiboLevels.get(7)
+
+        qtyTake1 = positionSize * takeVolume11 / 100
+        qtyTake2 = positionSize * (takeVolume11 + takeVolume12) / 100
+        qtyTake3 = positionSize * (takeVolume11 + takeVolume12 + takeVolume13) / 100
+        qtyTake4 = positionSize * (takeVolume11 + takeVolume12 + takeVolume13 + takeVolume14) / 100
+        qtyTake5 = positionSize * (takeVolume11 + takeVolume12 + takeVolume13 + takeVolume14 + takeVolume15) / 100
+        
+        strategy.order('TP short #1', strategy.long, qtyTake1, takeProfit1, oca_name='OCA #1', oca_type=strategy.oca.reduce)
+        strategy.order('TP short #2', strategy.long, qtyTake2, takeProfit2, oca_name='OCA #1', oca_type=strategy.oca.reduce)
+        strategy.order('TP short #3', strategy.long, qtyTake3, takeProfit3, oca_name='OCA #1', oca_type=strategy.oca.reduce)
+        strategy.order('TP short #4', strategy.long, qtyTake4, takeProfit4, oca_name='OCA #1', oca_type=strategy.oca.reduce)
+        strategy.order('TP short #5', strategy.long, qtyTake5, takeProfit5, oca_name='OCA #1', oca_type=strategy.oca.reduce)
+
+        alert_entry  = 'Entry: a=' + account + ', e=' + syminfo.prefix + ', s=' + syminfo.root + ', b=short, q=' + str.tostring(margin)       + '%, l=' + str.tostring(leverage)
+        alert_stop   = 'Stop: a='  + account + ', e=' + syminfo.prefix + ', s=' + syminfo.root + ', b=short, p=' + str.tostring(stopLoss)
+        alert_take_1 = 'Take: a='  + account + ', e=' + syminfo.prefix + ', s=' + syminfo.root + ', b=short, q=' + str.tostring(takeVolume11) + '%, p=' + str.tostring(takeProfit1)
+        alert_take_2 = 'Take: a='  + account + ', e=' + syminfo.prefix + ', s=' + syminfo.root + ', b=short, q=' + str.tostring(takeVolume12) + '%, p=' + str.tostring(takeProfit2)
+        alert_take_3 = 'Take: a='  + account + ', e=' + syminfo.prefix + ', s=' + syminfo.root + ', b=short, q=' + str.tostring(takeVolume13) + '%, p=' + str.tostring(takeProfit3)
+        alert_take_4 = 'Take: a='  + account + ', e=' + syminfo.prefix + ', s=' + syminfo.root + ', b=short, q=' + str.tostring(takeVolume14) + '%, p=' + str.tostring(takeProfit4)
+        alert_take_5 = 'Take: a='  + account + ', e=' + syminfo.prefix + ', s=' + syminfo.root + ', b=short, q=100%, p=' + str.tostring(takeProfit5)
+        alert(message=alert_entry  + '\n' + alert_stop + '\n' + alert_take_1  + '\n' + alert_take_2  + '\n' + alert_take_3  + '\n' + alert_take_4  + '\n' + alert_take_5)
+    else if lastChannelRange < channelRange
+        if close <= fiboLevels.get(0) and close > fiboLevels.get(2)
+            takeProfit1  := fiboLevels.get(2)
+            takeProfit2  := fiboLevels.get(3)
+            takeProfit3  := fiboLevels.get(4)
+            takeProfit4  := fiboLevels.get(5)
+            takeProfit5  := fiboLevels.get(6)
+            takeProfit6  := fiboLevels.get(7)
+            takeProfit7  := fiboLevels.get(8)
+            takeProfit8  := fiboLevels.get(9)
+            takeProfit9  := fiboLevels.get(10)
+            takeProfit10 := fiboLevels.get(11)
+        else if close <= fiboLevels.get(2)
+            takeProfit1  := fiboLevels.get(3)
+            takeProfit2  := fiboLevels.get(4)
+            takeProfit3  := fiboLevels.get(5)
+            takeProfit4  := fiboLevels.get(6)
+            takeProfit5  := fiboLevels.get(7)
+            takeProfit6  := fiboLevels.get(8)
+            takeProfit7  := fiboLevels.get(9)
+            takeProfit8  := fiboLevels.get(10)
+            takeProfit9  := fiboLevels.get(11)
+            takeProfit10 := fiboLevels.get(12)
+
+        qtyTake1  = positionSize * takeVolume21 / 100
+        qtyTake2  = positionSize * (takeVolume21 + takeVolume22) / 100
+        qtyTake3  = positionSize * (takeVolume21 + takeVolume22 + takeVolume23) / 100
+        qtyTake4  = positionSize * (takeVolume21 + takeVolume22 + takeVolume23 + takeVolume24) / 100
+        qtyTake5  = positionSize * (takeVolume21 + takeVolume22 + takeVolume23 + takeVolume24 + takeVolume25) / 100
+        qtyTake6  = positionSize * (takeVolume21 + takeVolume22 + takeVolume23 + takeVolume24 + takeVolume25 + takeVolume26) / 100
+        qtyTake7  = positionSize * (takeVolume21 + takeVolume22 + takeVolume23 + takeVolume24 + takeVolume25 + takeVolume26 + takeVolume27) / 100
+        qtyTake8  = positionSize * (takeVolume21 + takeVolume22 + takeVolume23 + takeVolume24 + takeVolume25 + takeVolume26 + takeVolume27 + takeVolume28) / 100
+        qtyTake9  = positionSize * (takeVolume21 + takeVolume22 + takeVolume23 + takeVolume24 + takeVolume25 + takeVolume26 + takeVolume27 + takeVolume28 + takeVolume29) / 100
+        qtyTake10 = positionSize * (takeVolume21 + takeVolume22 + takeVolume23 + takeVolume24 + takeVolume25 + takeVolume26 + takeVolume27 + takeVolume28 + takeVolume29 + takeVolume210) / 100
+        
+        strategy.order('TP short #1',  strategy.long, qtyTake1,  takeProfit1,  oca_name='OCA #1', oca_type=strategy.oca.reduce)
+        strategy.order('TP short #2',  strategy.long, qtyTake2,  takeProfit2,  oca_name='OCA #1', oca_type=strategy.oca.reduce)
+        strategy.order('TP short #3',  strategy.long, qtyTake3,  takeProfit3,  oca_name='OCA #1', oca_type=strategy.oca.reduce)
+        strategy.order('TP short #4',  strategy.long, qtyTake4,  takeProfit4,  oca_name='OCA #1', oca_type=strategy.oca.reduce)
+        strategy.order('TP short #5',  strategy.long, qtyTake5,  takeProfit5,  oca_name='OCA #1', oca_type=strategy.oca.reduce)
+        strategy.order('TP short #6',  strategy.long, qtyTake6,  takeProfit6,  oca_name='OCA #1', oca_type=strategy.oca.reduce)
+        strategy.order('TP short #7',  strategy.long, qtyTake7,  takeProfit7,  oca_name='OCA #1', oca_type=strategy.oca.reduce)
+        strategy.order('TP short #8',  strategy.long, qtyTake8,  takeProfit8,  oca_name='OCA #1', oca_type=strategy.oca.reduce)
+        strategy.order('TP short #9',  strategy.long, qtyTake9,  takeProfit9,  oca_name='OCA #1', oca_type=strategy.oca.reduce)
+        strategy.order('TP short #10', strategy.long, qtyTake10, takeProfit10, oca_name='OCA #1', oca_type=strategy.oca.reduce)
+
+        alert_entry   = 'Entry: a=' + account + ', e=' + syminfo.prefix + ', s=' + syminfo.root + ', b=short, q=' + str.tostring(margin)       + '%, l=' + str.tostring(leverage)
+        alert_stop    = 'Stop: a='  + account + ', e=' + syminfo.prefix + ', s=' + syminfo.root + ', b=short, p=' + str.tostring(stopLoss)
+        alert_take_1  = 'Take: a='  + account + ', e=' + syminfo.prefix + ', s=' + syminfo.root + ', b=short, q=' + str.tostring(takeVolume21) + '%, p=' + str.tostring(takeProfit1)
+        alert_take_2  = 'Take: a='  + account + ', e=' + syminfo.prefix + ', s=' + syminfo.root + ', b=short, q=' + str.tostring(takeVolume22) + '%, p=' + str.tostring(takeProfit2)
+        alert_take_3  = 'Take: a='  + account + ', e=' + syminfo.prefix + ', s=' + syminfo.root + ', b=short, q=' + str.tostring(takeVolume23) + '%, p=' + str.tostring(takeProfit3)
+        alert_take_4  = 'Take: a='  + account + ', e=' + syminfo.prefix + ', s=' + syminfo.root + ', b=short, q=' + str.tostring(takeVolume24) + '%, p=' + str.tostring(takeProfit4)
+        alert_take_5  = 'Take: a='  + account + ', e=' + syminfo.prefix + ', s=' + syminfo.root + ', b=short, q=' + str.tostring(takeVolume25) + '%, p=' + str.tostring(takeProfit5)
+        alert_take_6  = 'Take: a='  + account + ', e=' + syminfo.prefix + ', s=' + syminfo.root + ', b=short, q=' + str.tostring(takeVolume26) + '%, p=' + str.tostring(takeProfit6)
+        alert_take_7  = 'Take: a='  + account + ', e=' + syminfo.prefix + ', s=' + syminfo.root + ', b=short, q=' + str.tostring(takeVolume27) + '%, p=' + str.tostring(takeProfit7)
+        alert_take_8  = 'Take: a='  + account + ', e=' + syminfo.prefix + ', s=' + syminfo.root + ', b=short, q=' + str.tostring(takeVolume28) + '%, p=' + str.tostring(takeProfit8)
+        alert_take_9  = 'Take: a='  + account + ', e=' + syminfo.prefix + ', s=' + syminfo.root + ', b=short, q=' + str.tostring(takeVolume29) + '%, p=' + str.tostring(takeProfit9)
+        alert_take_10 = 'Take: a='  + account + ', e=' + syminfo.prefix + ', s=' + syminfo.root + ', b=short, q=100%, p=' + str.tostring(takeProfit10)
+        alert(message=alert_entry + '\n' + alert_stop + '\n' + alert_take_1  + '\n' + alert_take_2  + '\n' + alert_take_3  + '\n' + alert_take_4  + '\n' + alert_take_5 +
+          '\n' + alert_take_6 + '\n' + alert_take_7 + '\n' + alert_take_8 + '\n' + alert_take_9 + '\n' + alert_take_10)
+
+// ————— Visuals
+midBody   = plot(math.avg(close, open),             '(close + open) / 2', display=display.none,        editable=false)
+uptrend   = plot(stDirection < 0 ? supertrend : na, 'Uptrend',            color.new(color.green, 0), style=plot.style_linebr)
+downtrend = plot(stDirection < 0? na : supertrend,  'downtrend',          color.new(color.red, 0),   style=plot.style_linebr)
+
+fill(midBody, uptrend,   color.new(color.green, 90), 'Uptrend bg')
+fill(midBody, downtrend, color.new(color.red, 90),   'downtrend bg')
+
+plot(pivotHH, 'Pivot HH', color.new(color.green, 0), 2, plot.style_circles)
+plot(pivotLL, 'Pivot LL', color.new(color.red, 0),   2, plot.style_circles)
+
+plot(stopLoss,     'Stop-loss',       color.new(color.red, 0),  style=plot.style_linebr, editable=false)
+plot(takeProfit1,  'Take-profit #1',  color.new(color.gray, 0), style=plot.style_linebr, editable=false)
+plot(takeProfit2,  'Take-profit #2',  color.new(color.gray, 0), style=plot.style_linebr, editable=false)
+plot(takeProfit3,  'Take-profit #3',  color.new(color.gray, 0), style=plot.style_linebr, editable=false)
+plot(takeProfit4,  'Take-profit #4',  color.new(color.gray, 0), style=plot.style_linebr, editable=false)
+plot(takeProfit5,  'Take-profit #5',  color.new(color.gray, 0), style=plot.style_linebr, editable=false)
+plot(takeProfit6,  'Take-profit #6',  color.new(color.gray, 0), style=plot.style_linebr, editable=false)
+plot(takeProfit7,  'Take-profit #7',  color.new(color.gray, 0), style=plot.style_linebr, editable=false)
+plot(takeProfit8,  'Take-profit #8',  color.new(color.gray, 0), style=plot.style_linebr, editable=false)
+plot(takeProfit9,  'Take-profit #9',  color.new(color.gray, 0), style=plot.style_linebr, editable=false)
+plot(takeProfit10, 'Take-profit #10', color.new(color.gray, 0), style=plot.style_linebr, editable=false)
